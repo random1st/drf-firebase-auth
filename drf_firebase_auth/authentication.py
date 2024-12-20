@@ -109,6 +109,20 @@ class FirebaseAuthentication(authentication.TokenAuthentication):
                 raise Exception(
                     'User account is not currently active.'
                 )
+            associated_firebase_users = FirebaseUser.objects.filter(
+                user=user
+            )
+            if associated_firebase_users.count() > 1:
+                if api_settings.FIREBASE_UNIQUE_EMAIL_ASSOCIATION:
+                    raise Exception(
+                        'Multiple Firebase users associated with this email.'
+                        f' {email}: {associated_firebase_users.values_list("uid", flat=True)}'
+                    )
+                else:
+                    username = api_settings.FIREBASE_USERNAME_MAPPING_FUNC(firebase_user)
+                    user.username = username
+                    user.save()
+
             user.last_login = timezone.now()
             user.save()
         except User.DoesNotExist as e:
