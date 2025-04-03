@@ -95,112 +95,97 @@ class FirebaseAuthentication(authentication.TokenAuthentication):
         firebase_user: firebase_auth.UserRecord
     ) -> User:
         """
-        Attempts to return or create a local User from Firebase user data
+        Attempts to return or create a local User based on the firebase_user UID.
+        This allows multiple FirebaseUsers to share the same email, as each
+        UID now maps to its own unique local User.
         """
-        email = get_firebase_user_email(firebase_user)
-        log.info(f'_get_or_create_local_user - email: {email}')
-        user = None
-        try:
-            user = User.objects.get(email=email)
-            log.info(
-                f'_get_or_create_local_user - user.is_active: {user.is_active}'
-            )
-            if not user.is_active:
-                raise Exception(
-                    'User account is not currently active.'
-                )
-            associated_firebase_users = FirebaseUser.objects.filter(
-                user=user
-            )
-            if associated_firebase_users.count() > 1:
-                if api_settings.FIREBASE_UNIQUE_EMAIL_ASSOCIATION:
-                    raise Exception(
-                        'Multiple Firebase users associated with this email.'
-                        f' {email}: {associated_firebase_users.values_list("uid", flat=True)}'
-                    )
-                else:
-                    username = api_settings.FIREBASE_USERNAME_MAPPING_FUNC(firebase_user)
-                    user.username = username
-                    user.save()
+        uid = firebase_user.uid
+        log.info(f'_get_or_create_local_user - uid: {uid}')
 
+        # Try looking up an existing FirebaseUser with the matching UID
+        local_firebase_user = FirebaseUser.objects.filter(uid=uid).first()
+        if local_firebase_user:
+            # Existing user found
+            user = local_firebase_user.user
+            if not user.is_active:
+                raise Exception('User account is not currently active.')
+
+            # Update last login
             user.last_login = timezone.now()
             user.save()
-        except User.DoesNotExist as e:
-            log.error(
-                f'_get_or_create_local_user - User.DoesNotExist: {email}'
+            return user
+
+        # If we reach here, we have no existing record with that UID.
+        if not api_settings.FIREBASE_CREATE_LOCAL_USER:
+            raise Exception('User is not registered to the application.')
+
+        # Create a brand new local user
+        email = get_firebase_user_email(firebase_user)
+        username = api_settings.FIREBASE_USERNAME_MAPPING_FUNC(firebase_user)
+        log.info(f'_get_or_create_local_user - Creating new user for UID {uid} with username: {username}')
+
+        try:
+            user = User.objects.create_user(
+                username=username,
+                email=email  # Allow duplicates since we don't rely on it for uniqueness
             )
-            if not api_settings.FIREBASE_CREATE_LOCAL_USER:
-                raise Exception('User is not registered to the application.')
-            username = \
-                api_settings.FIREBASE_USERNAME_MAPPING_FUNC(firebase_user)
-            log.info(
-                f'_get_or_create_local_user - username: {username}'
-            )
-            try:
-                user = User.objects.create_user(
-                    username=username,
-                    email=email
-                )
-                user.last_login = timezone.now()
-                if (
+            user.last_login = timezone.now()
+
+            # Optionally fill in first/last name from display_name
+            if (
                     api_settings.FIREBASE_ATTEMPT_CREATE_WITH_DISPLAY_NAME
                     and firebase_user.display_name is not None
-                ):
-                    display_name = firebase_user.display_name.split(' ')
-                    if len(display_name) == 2:
-                        user.first_name = display_name[0]
-                        user.last_name = display_name[1]
-                user.save()
-            except Exception as e:
-                raise Exception(e)
+            ):
+                display_name = firebase_user.display_name.split(' ')
+                if len(display_name) == 2:
+                    user.first_name = display_name[0]
+                    user.last_name = display_name[1]
+
+            user.save()
+
+        except Exception as e:
+            raise Exception(e)
+
         return user
 
     def _create_local_firebase_user(
-        self,
-        user: User,
-        firebase_user: firebase_auth.UserRecord
+            self,
+            user: User,
+            firebase_user: firebase_auth.UserRecord
     ):
-        """ Create a local FireBase model if one does not already exist """
-        # pylint: disable=no-member
-        local_firebase_user = FirebaseUser.objects.filter(
-            user=user
-        ).first()
+        """
+        Create or update a local FirebaseUser model if needed,
+        ensuring each unique Firebase UID is handled independently.
+        """
+        local_firebase_user = FirebaseUser.objects.filter(user=user).first()
 
-        if not local_firebase_user:
-            new_firebase_user = FirebaseUser(
-                uid=firebase_user.uid,
-                user=user
+        # If the user is missing a FirebaseUser record or has a different UID, fix it
+        if not local_firebase_user or local_firebase_user.uid != firebase_user.uid:
+            FirebaseUser.objects.update_or_create(
+                user=user,
+                defaults={'uid': firebase_user.uid}
             )
-            new_firebase_user.save()
-            local_firebase_user = new_firebase_user
+            local_firebase_user = FirebaseUser.objects.get(user=user)
 
-        if local_firebase_user.uid != firebase_user.uid:
-            local_firebase_user.uid = firebase_user.uid
-            local_firebase_user.save()
-
-        # store FirebaseUserProvider data
+        # Store or update FirebaseUserProvider data
         for provider in firebase_user.provider_data:
             local_provider = FirebaseUserProvider.objects.filter(
                 provider_id=provider.provider_id,
                 firebase_user=local_firebase_user
             ).first()
+
             if not local_provider:
-                new_local_provider = FirebaseUserProvider.objects.create(
+                FirebaseUserProvider.objects.create(
                     provider_id=provider.provider_id,
                     uid=provider.uid,
                     firebase_user=local_firebase_user,
                 )
-                new_local_provider.save()
 
-        # catch locally stored providers no longer associated at Firebase
+        # Remove any locally stored providers that Firebase no longer reports
         local_providers = FirebaseUserProvider.objects.filter(
             firebase_user=local_firebase_user
         )
-        if len(local_providers) != len(firebase_user.provider_data):
-            current_providers = \
-                [x.provider_id for x in firebase_user.provider_data]
-            for provider in local_providers:
-                if provider.provider_id not in current_providers:
-                    FirebaseUserProvider.objects.filter(
-                        id=provider.id
-                    ).delete()
+        current_providers = [x.provider_id for x in firebase_user.provider_data]
+        for provider in local_providers:
+            if provider.provider_id not in current_providers:
+                provider.delete()
