@@ -19,7 +19,7 @@ class FirebaseUser(models.Model):
         related_name='firebase_user',
         related_query_name='firebase_user',
     )
-    uid = models.CharField(max_length=191, null=False,)
+    uid = models.CharField(max_length=191, null=False, unique=True)
 
 
 class FirebaseUserProvider(models.Model):

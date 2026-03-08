@@ -157,15 +157,10 @@ class FirebaseAuthentication(authentication.TokenAuthentication):
         Create or update a local FirebaseUser model if needed,
         ensuring each unique Firebase UID is handled independently.
         """
-        local_firebase_user = FirebaseUser.objects.filter(user=user).first()
-
-        # If the user is missing a FirebaseUser record or has a different UID, fix it
-        if not local_firebase_user or local_firebase_user.uid != firebase_user.uid:
-            FirebaseUser.objects.update_or_create(
-                user=user,
-                defaults={'uid': firebase_user.uid}
-            )
-            local_firebase_user = FirebaseUser.objects.get(user=user)
+        local_firebase_user, _ = FirebaseUser.objects.update_or_create(
+            uid=firebase_user.uid,
+            defaults={'user': user}
+        )
 
         # Store or update FirebaseUserProvider data
         for provider in firebase_user.provider_data:
